@@ -1,0 +1,185 @@
+---
+title: "Análisis macro"
+author: "Juan Alvaro Díaz Raimond Kedilhac"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+## Setup
+
+```{r}
+library(tidyverse)
+library(tseries)
+library(urca)
+library(vars)
+library(lmtest)
+library(sandwich)
+library(kableExtra)
+```
+
+## Data load (long format)
+
+```{r}
+df <- read_csv("data/series.csv") %>%
+  arrange(unique_id, ds)
+```
+
+## Exploratory plots
+
+```{r}
+plot_facets <- function(df_long, value_col, ylabel, title) {
+  ggplot(df_long, aes(x = ds, y = .data[[value_col]])) +
+    geom_line() +
+    facet_wrap(~unique_id) +
+    labs(title = title, x = NULL, y = ylabel) +
+    theme_minimal(base_size = 11)
+}
+```
+
+```{r}
+plot_facets(df, "y", "Indice", "Indice base 2018")
+```
+
+```{r}
+df <- df %>%
+  group_by(unique_id) %>%
+  mutate(yoy = (y / lag(y, 12) - 1) * 100) %>%
+  ungroup()
+```
+
+```{r}
+plot_facets(df, "yoy", "Cambio porcentual anual (%)", "Variacion anual (%)")
+```
+
+## Stationarity tests
+
+```{r}
+adf_test <- function(series) {
+  test <- adf.test(na.omit(series))
+  tibble(
+    adf_stat = unname(test$statistic),
+    p_value = test$p.value,
+    n_lags = unname(test$parameter)
+  )
+}
+
+kpss_test <- function(series, null = "Trend") {
+  test <- kpss.test(na.omit(series), null = null)
+  tibble(
+    kpss_stat = unname(test$statistic),
+    kpss_p = test$p.value,
+    kpss_lags = unname(test$parameter)
+  )
+}
+```
+
+```{r}
+adf_df <- df %>%
+  group_by(unique_id) %>%
+  group_modify(~adf_test(.x$y)) %>%
+  ungroup()
+
+kpss_df <- df %>%
+  group_by(unique_id) %>%
+  group_modify(~kpss_test(.x$y, null = "Trend")) %>%
+  ungroup()
+```
+
+```{r}
+adf_df %>% kable()
+kpss_df %>% kable()
+```
+
+
+## Differences
+
+```{r}
+df <- df %>%
+  group_by(unique_id) %>%
+  mutate(dy = y - lag(y)) %>%
+  ungroup()
+```
+
+```{r}
+plot_facets(df, "dy", "Delta y", "Delta y, indices diferenciados")
+```
+
+```{r}
+adf_dy <- df %>%
+  group_by(unique_id) %>%
+  group_modify(~adf_test(.x$dy)) %>%
+  ungroup()
+
+kpss_dy <- df %>%
+  group_by(unique_id) %>%
+  group_modify(~kpss_test(.x$dy, null = "Level")) %>%
+  ungroup()
+```
+
+```{r}
+adf_dy %>% kable()
+kpss_dy %>% kable()
+```
+
+
+
+## VAR and cointegration
+
+```{r}
+df_wide <- df %>%
+  dplyr::select(ds, unique_id, y) %>%
+  tidyr::pivot_wider(names_from = unique_id, values_from = y) %>%
+  dplyr::arrange(ds) %>%
+  tidyr::drop_na(igae, consumo, inversion)
+
+start_year <- lubridate::year(min(df_wide$ds))
+start_month <- lubridate::month(min(df_wide$ds))
+
+Y_ts <- ts(
+  df_wide %>% dplyr::select(igae, consumo, inversion),
+  start = c(start_year, start_month),
+  frequency = 12
+)
+
+lag_sel <- VARselect(Y_ts, lag.max = 12, type = "const")
+lag_sel$selection
+
+as.data.frame(t(lag_sel$selection)) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE)
+
+K <- as.integer(lag_sel$selection["AIC(n)"])
+
+joh_trace <- ca.jo(Y_ts, type = "trace", ecdet = "const", K = K)
+summary(joh_trace)
+
+joh_eigen <- ca.jo(Y_ts, type = "eigen", ecdet = "const", K = K)
+summary(joh_eigen)
+```
+
+## Log transform and regression
+
+```{r}
+df <- df %>%
+  mutate(ly = log(y))
+```
+
+```{r}
+plot_facets(df, "ly", "Log", "Series en log")
+```
+
+```{r}
+df_wide_ly <- df %>%
+  dplyr::filter(is.finite(ly)) %>%
+  dplyr::select(ds, unique_id, ly) %>%
+  tidyr::pivot_wider(names_from = unique_id, values_from = ly) %>%
+  dplyr::arrange(ds) %>%
+  tidyr::drop_na(igae, consumo, inversion)
+
+model <- lm(igae ~ consumo + inversion, data = df_wide_ly)
+coeftest(model, vcov = vcovHAC(model))
+summary(model)
+```
