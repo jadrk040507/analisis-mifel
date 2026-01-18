@@ -1,0 +1,286 @@
+---
+title: "Examen de programación"
+author: "Juan Alvaro Díaz Raimond Kedilhac"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+# Examen de programación
+
+La información teórica fue obtenida del libro *Time Series Econometrics: Learning Through Replication. Springer. (2023)* de Levendis, J. D. 
+
+```{r}
+# install.packages(c(
+#   "tidyverse", "tseries", "urca",
+#   "vars", "lmtest", "sandwich", "kableExtra"
+# ))
+
+
+library(tidyverse)
+library(tseries)
+library(urca)
+library(vars)
+library(lmtest)
+library(sandwich)
+library(kableExtra)
+```
+
+## Limpieza de datos
+
+El método preferente para extraer los datos de INEGI es por medio de la API usando el código token y la librería INEGIpy, sin embargo, dado que ha presentado inestabilidad, decidí descargarlas de forma individual y procesarlas con código para unirlas. 
+La base de datos fue limpiada y después exportada para su uso para el script de R, cuya libreria de inegiR también estaba presentando dificultades.
+
+A pesar de estas limitaciones técnicas, toda la información utilizada en el estudio fue obtenida directamente del Banco de Información Económica (BIE), empleando los índices en cifras originales, es decir, sin ajuste estacional.
+
+```{r}
+df <- read_csv("https://raw.githubusercontent.com/jadrk040507/analisis-mifel/refs/heads/master/data/series.csv") %>%
+  arrange(unique_id, ds)
+```
+
+## Análisis exploratorio
+
+```{r}
+plot_facets <- function(df_long, value_col, ylabel, title) {
+  ggplot(df_long, aes(x = ds, y = .data[[value_col]])) +
+    geom_line() +
+    facet_wrap(~unique_id) +
+    labs(title = title, x = NULL, y = ylabel) +
+    theme_minimal(base_size = 11)
+}
+```
+
+```{r}
+plot_facets(df, "y", "Indice", "Indice base 2018")
+```
+
+```{r}
+df <- df %>%
+  group_by(unique_id) %>%
+  mutate(yoy = (y / lag(y, 12) - 1) * 100) %>%
+  ungroup()
+```
+
+```{r}
+plot_facets(df, "yoy", "Cambio porcentual anual (%)", "Variacion anual (%)")
+```
+
+## Pruebas de estacionariedad
+
+El test de ADF (Dickey-Fuller Aumentado por sus siglas en inglés) es una prueba de cointegración de la forma
+
+$$
+\Delta y_t = \alpha + \gamma y_{t-1} + \sum_{k=1}^{p-1} \delta_k \Delta y_{t-k} + \varepsilon_t
+$$
+
+Donde $\gamma = \left(\sum_{k=1}^{p}\beta_k\right) - 1$, por lo tanto si $\beta \to 1$ entonces $y_t$ es una serie de raíz unitaria. La $H_0$ es que el proceso es de raíz unitaria, mientras que $H_1$ es que la serie no es un random walk. Los términos $\delta_{k} \Delta y_{t-p}$ se incluyen para ajustar por la autocorrelación. 
+El estadístico sigue un distribución Dickey-Fuller, similar a la t-Student, pero con un ajuste en los valores críticos.
+
+
+El test KPSS (Kwiatkowski-Phillips-Schmidt-Shin) es una prueba LM (multiplicador de Lagrange) que tiene forma 
+
+$$
+LM = \frac{(\text{score})^2}{\text{information}} = \frac{\sum_{t=0}^{T}S_t^2}{\hat{\sigma}_\varepsilon^2}
+$$
+
+Partimos de que el modelo se descompone en los componentes: tendencia deterministica ($\beta t$), componente estocástico ($r_t$) y error ($\varepsilon_t$).
+$$
+y_t = \beta t + r_t + \varepsilon_t
+$$
+El componente estocástico evoluciona como:
+$$
+r_t = r_{t-1} + u_t, \quad u_t \sim iid(0, \sigma_u^2)
+$$
+
+La $H_0 : \sigma_u^2 = 0$, implica que $u_t=0$ y $r_t = r_0$. El modelo se reduce a
+$$
+y_t = \beta t + r_0 + \varepsilon_t
+$$
+Esto es un modelo estacionario alrededor de una tendencia determinística. Bajo $H_1$ la serie $y_t$ tiene una tendencia estocástica (caminata aleatoria).
+
+```{r}
+adf_test <- function(series) {
+  test <- adf.test(na.omit(series))
+  tibble(
+    adf_stat = unname(test$statistic),
+    p_value = test$p.value,
+    n_lags = unname(test$parameter)
+  )
+}
+
+kpss_test <- function(series, null = "Trend") {
+  test <- kpss.test(na.omit(series), null = null)
+  tibble(
+    kpss_stat = unname(test$statistic),
+    kpss_p = test$p.value,
+    kpss_lags = unname(test$parameter)
+  )
+}
+```
+
+```{r}
+adf_df <- df %>%
+  group_by(unique_id) %>%
+  group_modify(~adf_test(.x$y)) %>%
+  ungroup()
+
+kpss_df <- df %>%
+  group_by(unique_id) %>%
+  group_modify(~kpss_test(.x$y, null = "Trend")) %>%
+  ungroup()
+```
+
+```{r}
+adf_df %>% kable()
+kpss_df %>% kable()
+```
+
+La prueba de Dickey–Fuller Aumentada (ADF) fue implementada tanto en Python como en R, con diferencias en la determinación del número de rezagos. En Python, el número óptimo de rezagos se seleccionó de manera endógena utilizando el criterio de información de Akaike (AIC), el cual penaliza la inclusión de parámetros adicionales y busca un balance entre ajuste y parsimonia. Bajo esta especificación, los resultados del test ADF indican que, para todas las series, no se rechaza la hipótesis nula de presencia de raíz unitaria incluso al nivel de significancia del 1%, lo que sugiere que las series no son estacionarias en nivel.
+
+En contraste, en R la implementación del test ADF utiliza una selección de rezagos fija, lo que conduce a resultados ligeramente distintos. En particular, para las series de consumo y del IGAE se rechaza la hipótesis nula de raíz unitaria al nivel de significancia del 5%, aunque no al 1%, mientras que para la inversión no se encuentra evidencia suficiente para rechazar la hipótesis nula. Estos resultados constituyen evidencia mixta respecto a la estacionariedad en nivel de algunas series.
+
+De manera complementaria, se aplicó la prueba KPSS, cuya hipótesis nula establece que la serie es estacionaria en nivel o alrededor de una tendencia determinística. En todos los casos, el estadístico KPSS permite rechazar la hipótesis nula al nivel de significancia convencional, lo que indica la presencia de tendencias estocásticas en las series.
+
+En conjunto, considerando la sensibilidad de la prueba ADF a la especificación del número de rezagos y la evidencia robusta proporcionada por la prueba KPSS, se concluye que las series presentan comportamiento compatible con procesos integrados de orden uno. Por lo tanto, a efectos del análisis posterior, todas las series se tratan como no estacionarias en nivel.
+
+## Primera diferencia
+
+```{r}
+df <- df %>%
+  group_by(unique_id) %>%
+  mutate(dy = y - lag(y)) %>%
+  ungroup()
+```
+
+```{r}
+plot_facets(df, "dy", "Delta y", "Delta y, indices diferenciados")
+```
+
+```{r}
+adf_dy <- df %>%
+  group_by(unique_id) %>%
+  group_modify(~adf_test(.x$dy)) %>%
+  ungroup()
+
+kpss_dy <- df %>%
+  group_by(unique_id) %>%
+  group_modify(~kpss_test(.x$dy, null = "Level")) %>%
+  ungroup()
+```
+
+```{r}
+adf_dy %>% kable()
+kpss_dy %>% kable()
+```
+
+El mismo procedimiento se aplicó a la primera diferencia de cada serie. A diferencia del análisis en niveles, los resultados del test ADF para las series diferenciadas permiten rechazar la hipótesis nula de presencia de raíz unitaria, lo que indica que las primeras diferencias son estacionarias en nivel.
+
+De manera complementaria, se aplicó la prueba KPSS a las series en primera diferencia. Dado que la diferenciación elimina cualquier componente de tendencia determinística, la prueba se especificó únicamente con constante. En todos los casos, no se rechaza la hipótesis nula de estacionariedad, lo que confirma que las series diferenciadas son estacionarias.
+
+En conjunto, los resultados de las pruebas ADF y KPSS indican que todas las series son integradas de orden uno, ya que no son estacionarias en nivel, pero sí lo son después de aplicar la primera diferencia.
+
+## Pruebas de cointegración
+
+Existen diversas metodologías para realizar pruebas de cointegración. En sistemas bivariados es común utilizar el procedimiento de Engle--Granger, el cual consiste en un enfoque de dos etapas. En la primera etapa se estima la relación de largo plazo
+$$
+Y_t = \beta' X_t + \varepsilon_t,
+$$
+
+y en la segunda se aplica una prueba de raíz unitaria, como el test ADF, a los residuos estimados. Si los residuos resultan estacionarios, se concluye que existe cointegración entre las variables.
+
+Sin embargo, para sistemas con más de dos variables resulta más apropiado emplear el test de Johansen, el cual es un enfoque multivariado basado en un modelo de corrección de error (VECM). Este procedimiento permite determinar el número de relaciones de cointegración mediante dos pruebas distintas: el test del máximo eigenvalor y el test de la traza. Ambos son pruebas de razón de verosimilitud construidas a partir de los eigenvalores de la matriz $\Pi$, la cual contiene toda la información sobre las relaciones de largo plazo del sistema.
+
+El modelo VECM puede escribirse como:
+$$
+\Delta Y_t = \sum_{i=1}^{k-1} \Gamma_i \Delta Y_{t-i} + \Pi Y_{t-1} + (\gamma + \tau t) + \varepsilon_t.
+$$
+
+La matriz $\Pi$ determina la existencia de cointegración. Si el sistema contiene $n$ variables, puede haber a lo sumo $n-1$ relaciones linealmente independientes de cointegración. Cuando $\Pi$ no es de rango completo, es decir, es singular, su determinante es igual a cero, lo cual implica que al menos uno de sus eigenvalores es igual a cero. El número de relaciones de cointegración es igual al número de eigenvalores distintos de cero de $\Pi$.
+
+Dado que los verdaderos eigenvalores de $\Pi$ no son observables, el test de Johansen utiliza sus estimaciones muestrales y procede de manera secuencial. En el test del máximo eigenvalor se contrasta la hipótesis nula de que el rango de $\Pi$ es $r$ frente a la alternativa de que es $r+1$, utilizando el estadístico:
+$$
+LR(r, r+1) = -T \ln(1 - \lambda_{r+1}).
+$$
+El procedimiento inicia con $r=0$ y se incrementa sucesivamente hasta que no se rechaza la hipótesis nula.
+
+Por su parte, el test de la traza contrasta la hipótesis nula de que el rango de $\Pi$ es menor o igual a $r$ frente a la alternativa de que es mayor que $r$, utilizando el estadístico:
+$$
+LR(r,n) = -T \sum_{i=r+1}^{n} \ln(1 - \lambda_i).
+$$
+A diferencia del test de máximo eigenvalor, el test de la traza evalúa de manera conjunta la contribución de todos los eigenvalores restantes, permitiendo identificar el número total de relaciones de cointegración en el sistema.
+
+```{r}
+df_wide <- df %>%
+  dplyr::select(ds, unique_id, y) %>%
+  tidyr::pivot_wider(names_from = unique_id, values_from = y) %>%
+  dplyr::arrange(ds) %>%
+  tidyr::drop_na(igae, consumo, inversion)
+
+start_year <- lubridate::year(min(df_wide$ds))
+start_month <- lubridate::month(min(df_wide$ds))
+
+Y_ts <- ts(
+  df_wide %>% dplyr::select(igae, consumo, inversion),
+  start = c(start_year, start_month),
+  frequency = 12
+)
+
+lag_sel <- VARselect(Y_ts, lag.max = 12, type = "const")
+lag_sel$selection
+
+as.data.frame(t(lag_sel$selection)) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE)
+
+K <- as.integer(lag_sel$selection["AIC(n)"])
+
+joh_trace <- ca.jo(Y_ts, type = "trace", ecdet = "const", K = K)
+summary(joh_trace)
+
+joh_eigen <- ca.jo(Y_ts, type = "eigen", ecdet = "const", K = K)
+summary(joh_eigen)
+```
+
+De acuerdo con los resultados obtenidos a partir de las pruebas de cointegración de Johansen, se concluye que el sistema presenta un orden de cointegración igual a 1. Tanto el test de la traza como el test del máximo eigenvalor se evalúan de manera secuencial. En ambos casos, no se rechaza la hipótesis nula de ausencia de cointegración para $r = 0$ ni para $r = 1$, mientras que la hipótesis nula es rechazada al contrastar $r = 2$. Dado que el rango máximo posible del sistema es dos, estos resultados implican la existencia de exactamente una relación de cointegración entre las variables.
+
+En consecuencia, se identifica una combinación lineal estacionaria entre el IGAE, el consumo y la inversión, lo que indica la presencia de una relación de equilibrio de largo plazo que vincula a estas variables. A pesar de que las series individuales son integradas de orden uno, comparten una tendencia común de largo plazo, consistente con la existencia de cointegración de rango uno.
+
+## Transformación logarítmica y regresión
+
+```{r}
+df <- df %>%
+  mutate(ly = log(y))
+```
+
+```{r}
+plot_facets(df, "ly", "Log", "Series en log")
+```
+
+```{r}
+df_wide_ly <- df %>%
+  dplyr::filter(is.finite(ly)) %>%
+  dplyr::select(ds, unique_id, ly) %>%
+  tidyr::pivot_wider(names_from = unique_id, values_from = ly) %>%
+  dplyr::arrange(ds) %>%
+  tidyr::drop_na(igae, consumo, inversion)
+
+model <- lm(igae ~ consumo + inversion, data = df_wide_ly)
+cat('Ajuste de errores estándar HAC \n')
+coeftest(model, vcov = vcovHAC(model))
+cat('Resumen del modelo con SE iid')
+summary(model)
+```
+
+El modelo de regresión propuesto captura relaciones promedio entre las variables, aunque no es adecuado para realizar inferencia causal ni para fines predictivos. Bajo esta especificación en logaritmos, los coeficientes estimados se interpretan como elasticidades; es decir, miden el cambio porcentual promedio en la variable dependiente ante un cambio de $1\%$ en la variable independiente. En particular, la estimación sugiere que un aumento de $1\%$ en el consumo se asocia, en promedio, con un incremento aproximado de $0.74\%$ en el IGAE, que actúa como proxy del PIB. De manera análoga, un aumento de $1\%$ en la inversión se asocia con un incremento promedio cercano a $0.09\%$ en el IGAE.
+
+Con el fin de corregir posibles problemas de heterocedasticidad y autocorrelación en los residuos, se emplearon errores estándar robustos de tipo HAC (Newey-West). Tras este ajuste, los coeficientes de interés resultaron estadísticamente significativos al nivel del $1\%$, o cercanos a dicho umbral, de acuerdo con los valores $p$ obtenidos. El uso de errores HAC incrementa la incertidumbre asociada a las estimaciones al ampliar los errores estándar. Asimismo, pueden observarse ligeras discrepancias respecto a estimaciones realizadas en Python, lo cual se explica porque la librería *statsmodels* utiliza aproximaciones asintóticas para la inferencia, mientras que en R se emplea la distribución $t$ de Student, resultando en inferencia más conservadora. Recordemos que el valor $p$ representa la probabilidad, bajo la hipótesis nula, de observar un estadístico al menos tan extremo como el obtenido, y está directamente relacionado con la probabilidad de cometer un error tipo I ($\alpha$).
+
+El estadístico $F$ rechaza la hipótesis nula de que, conjuntamente, los coeficientes de los regresores (excluyendo la constante) sean iguales a cero, lo que indica que el modelo proporciona un mejor ajuste que una especificación que solo incluya la media del logaritmo del IGAE. El coeficiente de determinación $R^2$ y su versión ajustada indican una elevada proporción de la varianza explicada, lo cual es consistente con la existencia de una relación de equilibrio de largo plazo entre las variables, dado que se ha identificado cointegración de rango uno. No obstante, este buen ajuste no debe interpretarse como evidencia de causalidad ni de capacidad predictiva fuera de muestra, ya que el modelo no incorpora explícitamente la dinámica de corto plazo ni el mecanismo de corrección de error.
+
+Finalmente, los estadísticos de Jarque-Bera y Omnibus se utilizan para evaluar la normalidad de los residuos a partir del sesgo y la curtosis. En este caso, no se rechaza la hipótesis nula de normalidad, lo que sugiere que los residuos no presentan desviaciones significativas respecto a una distribución normal.
