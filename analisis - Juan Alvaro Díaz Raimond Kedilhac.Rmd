@@ -40,6 +40,7 @@ La base de datos fue limpiada y después exportada para su uso para el script de
 A pesar de estas limitaciones técnicas, toda la información utilizada en el estudio fue obtenida directamente del Banco de Información Económica (BIE), empleando los índices en cifras originales, es decir, sin ajuste estacional.
 
 ```{r}
+# Base de datos alojada en GitHib, previamente limpiada con Python
 df <- read_csv("https://raw.githubusercontent.com/jadrk040507/analisis-mifel/refs/heads/master/data/series.csv") %>%
   arrange(unique_id, ds)
 ```
@@ -47,6 +48,7 @@ df <- read_csv("https://raw.githubusercontent.com/jadrk040507/analisis-mifel/ref
 ## Análisis exploratorio
 
 ```{r}
+# Función auxiliar para gráficar
 plot_facets <- function(df_long, value_col, ylabel, title) {
   ggplot(df_long, aes(x = ds, y = .data[[value_col]])) +
     geom_line() +
@@ -61,6 +63,7 @@ plot_facets(df, "y", "Indice", "Indice base 2018")
 ```
 
 ```{r}
+# Cambio porcentual anual
 df <- df %>%
   group_by(unique_id) %>%
   mutate(yoy = (y / lag(y, 12) - 1) * 100) %>%
@@ -105,6 +108,7 @@ $$
 Esto es un modelo estacionario alrededor de una tendencia determinística. Bajo $H_1$ la serie $y_t$ tiene una tendencia estocástica (caminata aleatoria).
 
 ```{r}
+# Funciones auxiliares para las pruebas de raíz unitaria
 adf_test <- function(series) {
   test <- adf.test(na.omit(series))
   tibble(
@@ -152,6 +156,7 @@ En conjunto, considerando la sensibilidad de la prueba ADF a la especificación 
 ## Primera diferencia
 
 ```{r}
+# Aplicación de primera diferencia
 df <- df %>%
   group_by(unique_id) %>%
   mutate(dy = y - lag(y)) %>%
@@ -238,7 +243,7 @@ as.data.frame(t(lag_sel$selection)) %>%
   kable() %>%
   kable_styling(full_width = FALSE)
 
-K <- as.integer(lag_sel$selection["AIC(n)"])
+K <- as.integer(lag_sel$selection["AIC(n)"]) - 1
 
 joh_trace <- ca.jo(Y_ts, type = "trace", ecdet = "const", K = K)
 summary(joh_trace)
@@ -247,9 +252,9 @@ joh_eigen <- ca.jo(Y_ts, type = "eigen", ecdet = "const", K = K)
 summary(joh_eigen)
 ```
 
-De acuerdo con los resultados obtenidos a partir de las pruebas de cointegración de Johansen, se concluye que el sistema presenta un orden de cointegración igual a 1. Tanto el test de la traza como el test del máximo eigenvalor se evalúan de manera secuencial. En ambos casos, no se rechaza la hipótesis nula de ausencia de cointegración para $r = 0$ ni para $r = 1$, mientras que la hipótesis nula es rechazada al contrastar $r = 2$. Dado que el rango máximo posible del sistema es dos, estos resultados implican la existencia de exactamente una relación de cointegración entre las variables.
+De acuerdo con los resultados obtenidos a partir de las pruebas de cointegración de Johansen, se concluye que el sistema no presenta cointegración. Tanto el test de la traza como el test del máximo eigenvalor se evalúan de manera secuencial. En ambos casos, no se rechaza la hipótesis nula de ausencia de cointegración para $r=0$. Dado que no se rechaza para $r=0$, no es necesario continuar con las siguientes hipótesis nulas.
 
-En consecuencia, se identifica una combinación lineal estacionaria entre el IGAE, el consumo y la inversión, lo que indica la presencia de una relación de equilibrio de largo plazo que vincula a estas variables. A pesar de que las series individuales son integradas de orden uno, comparten una tendencia común de largo plazo, consistente con la existencia de cointegración de rango uno.
+En consecuencia, no se identifica una combinación lineal estacionaria entre el IGAE, el consumo y la inversión. A pesar de que las series individuales son integradas de orden uno, no comparten una tendencia común de largo plazo.
 
 ## Transformación logarítmica y regresión
 
@@ -263,14 +268,15 @@ plot_facets(df, "ly", "Log", "Series en log")
 ```
 
 ```{r}
-df_wide_ly <- df %>%
+# Regresión lineal
+ly_wide <- df %>%
   dplyr::filter(is.finite(ly)) %>%
   dplyr::select(ds, unique_id, ly) %>%
   tidyr::pivot_wider(names_from = unique_id, values_from = ly) %>%
   dplyr::arrange(ds) %>%
   tidyr::drop_na(igae, consumo, inversion)
 
-model <- lm(igae ~ consumo + inversion, data = df_wide_ly)
+model <- lm(igae ~ consumo + inversion, data = ly_wide)
 cat('Ajuste de errores estándar HAC \n')
 coeftest(model, vcov = vcovHAC(model))
 cat('Resumen del modelo con SE iid')
@@ -281,6 +287,6 @@ El modelo de regresión propuesto captura relaciones promedio entre las variable
 
 Con el fin de corregir posibles problemas de heterocedasticidad y autocorrelación en los residuos, se emplearon errores estándar robustos de tipo HAC (Newey-West). Tras este ajuste, los coeficientes de interés resultaron estadísticamente significativos al nivel del $1\%$, o cercanos a dicho umbral, de acuerdo con los valores $p$ obtenidos. El uso de errores HAC incrementa la incertidumbre asociada a las estimaciones al ampliar los errores estándar. Asimismo, pueden observarse ligeras discrepancias respecto a estimaciones realizadas en Python, lo cual se explica porque la librería *statsmodels* utiliza aproximaciones asintóticas para la inferencia, mientras que en R se emplea la distribución $t$ de Student, resultando en inferencia más conservadora. Recordemos que el valor $p$ representa la probabilidad, bajo la hipótesis nula, de observar un estadístico al menos tan extremo como el obtenido, y está directamente relacionado con la probabilidad de cometer un error tipo I ($\alpha$).
 
-El estadístico $F$ rechaza la hipótesis nula de que, conjuntamente, los coeficientes de los regresores (excluyendo la constante) sean iguales a cero, lo que indica que el modelo proporciona un mejor ajuste que una especificación que solo incluya la media del logaritmo del IGAE. El coeficiente de determinación $R^2$ y su versión ajustada indican una elevada proporción de la varianza explicada, lo cual es consistente con la existencia de una relación de equilibrio de largo plazo entre las variables, dado que se ha identificado cointegración de rango uno. No obstante, este buen ajuste no debe interpretarse como evidencia de causalidad ni de capacidad predictiva fuera de muestra, ya que el modelo no incorpora explícitamente la dinámica de corto plazo ni el mecanismo de corrección de error.
+El estadístico $F$ rechaza la hipótesis nula de que, conjuntamente, los coeficientes de los regresores (excluyendo la constante) sean iguales a cero, lo que indica que el modelo proporciona un mejor ajuste que una especificación que solo incluya la media del logaritmo del IGAE. El coeficiente de determinación $R^2$ y su versión ajustada indican una elevada proporción de la varianza explicada, lo cual es consistente con que las series tienen una tendencia positiva a pesar de que no estén cointegradas. No obstante, este buen ajuste no debe interpretarse como evidencia de causalidad ni de capacidad predictiva fuera de muestra, ya que el modelo no incorpora explícitamente la dinámica de corto plazo ni el mecanismo de corrección de error.
 
 Finalmente, los estadísticos de Jarque-Bera y Omnibus se utilizan para evaluar la normalidad de los residuos a partir del sesgo y la curtosis. En este caso, no se rechaza la hipótesis nula de normalidad, lo que sugiere que los residuos no presentan desviaciones significativas respecto a una distribución normal.
